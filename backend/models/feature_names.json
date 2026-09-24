@@ -1,0 +1,22 @@
+[
+  "latitude",
+  "longitude",
+  "brightness",
+  "scan",
+  "track",
+  "bright_t31",
+  "frp",
+  "type",
+  "hour",
+  "month",
+  "doy",
+  "dow",
+  "hs",
+  "hc",
+  "ds",
+  "dc",
+  "bd",
+  "cn",
+  "dn",
+  "worldcover_code"
+]

@@ -1,0 +1,167 @@
+{
+  "protocol": "temporal_train_2022_2023_test_2024",
+  "selected_model": "XGBClassifier_worldcover_context_balanced08",
+  "train_years": [
+    2022,
+    2023
+  ],
+  "validation_year": 2023,
+  "test_year": 2024,
+  "train_rows": 1101314,
+  "test_rows": 552312,
+  "classes": {
+    "Agriculture": 215275,
+    "Wildfire": 193106,
+    "Other": 107573,
+    "Industry": 36358
+  },
+  "model_hyperparameters": {
+    "n_estimators": 20,
+    "max_depth": 6,
+    "learning_rate": 0.08,
+    "subsample": 0.9,
+    "colsample_bytree": 0.9,
+    "max_bin": 96,
+    "tree_method": "hist",
+    "random_state": 42,
+    "class_weighting": "inverse_frequency^0.8",
+    "low_label_confidence_weight": 0.5
+  },
+  "final_2024_test": {
+    "accuracy": 0.9481651675140138,
+    "precision_macro": 0.903700455929787,
+    "recall_macro": 0.8151086062247989,
+    "f1_macro": 0.825749650443919,
+    "f1_weighted": 0.937453339672218,
+    "classification_report": {
+      "Agriculture": {
+        "precision": 0.9973774077111627,
+        "recall": 0.9998885146905121,
+        "f1-score": 0.9986313826283021,
+        "support": 215275.0
+      },
+      "Industry": {
+        "precision": 0.8076618020304569,
+        "recall": 0.2800759117663238,
+        "f1-score": 0.4159212514806192,
+        "support": 36358.0
+      },
+      "Other": {
+        "precision": 0.8295090443325055,
+        "recall": 0.9843176261701356,
+        "f1-score": 0.90030694407836,
+        "support": 107573.0
+      },
+      "Wildfire": {
+        "precision": 0.9802535696450229,
+        "recall": 0.9961523722722235,
+        "f1-score": 0.9881390235883949,
+        "support": 193106.0
+      },
+      "accuracy": 0.9481651675140138,
+      "macro avg": {
+        "precision": 0.903700455929787,
+        "recall": 0.8151086062247989,
+        "f1-score": 0.825749650443919,
+        "support": 552312.0
+      },
+      "weighted avg": {
+        "precision": 0.9462061506704476,
+        "recall": 0.9481651675140138,
+        "f1-score": 0.937453339672218,
+        "support": 552312.0
+      }
+    },
+    "confusion_matrix": [
+      [
+        215251,
+        24,
+        0,
+        0
+      ],
+      [
+        557,
+        10183,
+        21763,
+        3855
+      ],
+      [
+        9,
+        1658,
+        105886,
+        20
+      ],
+      [
+        0,
+        743,
+        0,
+        192363
+      ]
+    ],
+    "labels": [
+      "Agriculture",
+      "Industry",
+      "Other",
+      "Wildfire"
+    ],
+    "test_year": 2024,
+    "test_rows": 552312,
+    "note": "Final production model fit on all 1,101,314 labeled rows from 2022+2023; 2024 labels were used only for this held-out evaluation. WorldCover is inference-available context and labels were constructed from WorldCover/OSM evidence."
+  },
+  "leakage_controls": [
+    "2024 labels never used for fitting.",
+    "2024 remains a held-out temporal test year.",
+    "WorldCover context is available at inference time.",
+    "Label confidence is used only as a training weight.",
+    "Metrics measure agreement with the WorldCover/OSM-derived labeling methodology, not independent fire ground truth."
+  ],
+  "forward_validation_2022_to_2023": {
+    "train_year": 2022,
+    "validation_year": 2023,
+    "train_rows": 557241,
+    "validation_rows": 544073,
+    "accuracy": 0.9943,
+    "precision_macro": 0.9238,
+    "recall_macro": 0.9672,
+    "f1_macro": 0.9428,
+    "f1_weighted": 0.9947,
+    "note": "Observed validation run with WorldCover context and inverse-frequency^0.8 weighting; exact report retained in training script rerun."
+  },
+  "validation_model_selection": {
+    "candidates": [
+      "XGBClassifier (unweighted)",
+      "XGBClassifier (class-balanced sample weights)"
+    ],
+    "selection_metric": "2023 forward-validation Macro F1",
+    "selected": "XGBClassifier (unweighted)",
+    "reason": "unweighted XGB had higher 2023 forward-validation Macro F1 (0.7160 vs 0.6607)."
+  },
+  "final_model_fit": "full 2022+2023 labeled observations",
+  "features": [
+    "latitude",
+    "longitude",
+    "brightness",
+    "scan",
+    "track",
+    "bright_t31",
+    "frp",
+    "type",
+    "hour",
+    "month",
+    "doy",
+    "dow",
+    "hs",
+    "hc",
+    "ds",
+    "dc",
+    "bd",
+    "cn",
+    "dn",
+    "worldcover_code"
+  ],
+  "training_rows": 1101314,
+  "training_years": [
+    2022,
+    2023
+  ]
+}

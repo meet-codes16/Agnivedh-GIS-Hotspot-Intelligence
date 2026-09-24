@@ -1,0 +1,7 @@
+{
+  "FOREST": "Wildfire",
+  "AGRICULTURAL": "Agriculture",
+  "INDUSTRIAL": "Industry",
+  "URBAN_WASTE": "Other",
+  "UNKNOWN": "Other"
+}

@@ -1,0 +1,3 @@
+model,stage,train_years,eval_year,accuracy,precision_macro,recall_macro,f1_macro,f1_weighted
+XGBClassifier_worldcover_context_balanced08,forward_validation,2022,2023,0.9943,0.9238,0.9672,0.9428,0.9947
+XGBClassifier_worldcover_context_balanced08,final_test,"2022,2023",2024,0.9481651675140138,0.903700455929787,0.8151086062247989,0.825749650443919,0.937453339672218
