@@ -1,4 +1,4 @@
-"""FIRMS-backed data store with a real runtime dataset.
+﻿"""FIRMS-backed data store with a real runtime dataset.
 
 Prototype source of truth is the frontend mock JS files so both sides share
 the same FIRMS-shaped records.
@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 FRONTEND_DATA = ROOT / "frontend" / "src" / "data"
 
-# FUTURE CSV hook — keep this path; load when the file is present.
+# FUTURE CSV hook â€” keep this path; load when the file is present.
 FIRMS_CSV_PATH = DATA_DIR / "fires_runtime.csv"
 HOTSPOTS_2024_CSV_PATH = DATA_DIR / "hotspots_2024.csv"
 
@@ -508,7 +508,7 @@ def recent_event_context(hotspot: dict, radius_km: float = 5.0, hours: int = 72)
         distances = 6371.0088 * 2.0 * np.arcsin(np.sqrt(np.clip(a, 0.0, 1.0)))
         same_pass_count = int(((distances <= radius_km) & (distances > 0.001)).sum())
 
-    # Strictly prior temporal context — never use future observations here.
+    # Strictly prior temporal context â€” never use future observations here.
     start = ts - pd.Timedelta(hours=hours)
     h = frame[(frame["timestamp"] < ts) & (frame["timestamp"] >= start)].copy()
     if h.empty:
@@ -721,88 +721,195 @@ def persistent_source_history(hotspot: dict, radius_km: float = 5.0) -> dict:
 
 
 def historical_2024_baselines(acq_date: str, daynight: str | None = None) -> dict[str, dict]:
-    """Build leakage-safe 2024 baselines from observations before the selected date.
+    """Build leakage-safe 2024 baselines without loading the full dataset.
 
-    Only rows from the selected calendar month and dates strictly before the
-    selected date are read. This keeps the selected-hotspot path fast even when
-    optional parquet support is unavailable.
+    Only observations strictly before the selected date and belonging to the
+    selected calendar month/day-night are read. Parquet filtering is pushed
+    down where possible; CSV is used only as a fallback.
     """
     try:
-        month = int(acq_date[5:7])
-    except (TypeError, ValueError):
-        month = 1
-    wanted = (daynight or "").upper()
-
-    # The first day of a month has no same-month prior history, so immediately
-    # use the independent 2022-2023 baseline artifact.
-    try:
         selected_ts = pd.Timestamp(acq_date)
-    except Exception:
-        selected_ts = None
-    if selected_ts is not None and selected_ts.day <= 1:
+        month = int(selected_ts.month)
+    except (TypeError, ValueError):
         return {}
+
+    wanted = (daynight or "").strip().upper()
+
+    # First day of a month has no same-month historical observations.
+    if selected_ts.day <= 1:
+        return {}
+
+    columns = [
+        "latitude",
+        "longitude",
+        "frp",
+        "acq_date",
+        "acq_time",
+        "daynight",
+        "region_key",
+        "brightness",
+        "scan",
+        "track",
+    ]
 
     history: list[dict] = []
     parquet_path = DATA_DIR / "hotspots_2024.parquet"
-    columns = [
-        "latitude", "longitude", "frp", "acq_date", "acq_time",
-        "daynight", "region_key", "brightness", "scan", "track",
-    ]
 
+    # --------------------------------------------------------
+    # PARQUET PATH
+    # --------------------------------------------------------
     if parquet_path.exists():
         try:
-            frame = pd.read_parquet(parquet_path, columns=columns, engine="pyarrow")
-            frame["_date"] = pd.to_datetime(frame["acq_date"], errors="coerce")
-            frame = frame[(frame["_date"] < selected_ts) & (frame["_date"].dt.month == month)]
+            # Read only the selected month/date range.
+            # This avoids loading the complete 552k-row dataset.
+            filters = [
+                ("acq_date", "<", acq_date),
+            ]
+
             if wanted in {"D", "N"}:
-                frame = frame[frame["daynight"].astype(str).str.upper() == wanted]
-            history = [row for row in frame.drop(columns=["_date"]).to_dict("records")]
-        except (ImportError, ModuleNotFoundError, ValueError, OSError):
+                filters.append(("daynight", "==", wanted))
+
+            frame = pd.read_parquet(
+                parquet_path,
+                columns=columns,
+                filters=[filters],
+                engine="pyarrow",
+            )
+
+            if not frame.empty:
+                dates = pd.to_datetime(
+                    frame["acq_date"],
+                    errors="coerce",
+                )
+
+                frame = frame[
+                    dates.notna()
+                    & dates.lt(selected_ts)
+                    & dates.dt.month.eq(month)
+                ]
+
+                if wanted in {"D", "N"} and "daynight" in frame.columns:
+                    frame = frame[
+                        frame["daynight"]
+                        .astype(str)
+                        .str.upper()
+                        .eq(wanted)
+                    ]
+
+                if not frame.empty:
+                    history = frame.to_dict("records")
+
+                del frame
+
+        except (
+            ImportError,
+            ModuleNotFoundError,
+            ValueError,
+            OSError,
+            KeyError,
+        ):
             history = []
 
-    if not history and HOTSPOTS_2024_CSV_PATH.exists() and selected_ts is not None and selected_ts.day > 1:
-        for chunk in pd.read_csv(
-            HOTSPOTS_2024_CSV_PATH,
-            dtype=str,
-            keep_default_na=False,
-            usecols=lambda c: c in columns,
-            chunksize=50000,
+    # --------------------------------------------------------
+    # CSV FALLBACK
+    # --------------------------------------------------------
+    # Only reached if Parquet could not be used.
+    if not history and HOTSPOTS_2024_CSV_PATH.exists():
+        try:
+            for chunk in pd.read_csv(
+                HOTSPOTS_2024_CSV_PATH,
+                dtype=str,
+                keep_default_na=False,
+                usecols=lambda c: c in columns,
+                chunksize=50000,
+            ):
+                dates = pd.to_datetime(
+                    chunk.get("acq_date"),
+                    errors="coerce",
+                )
+
+                mask = (
+                    dates.notna()
+                    & dates.lt(selected_ts)
+                    & dates.dt.month.eq(month)
+                )
+
+                if wanted in {"D", "N"} and "daynight" in chunk.columns:
+                    mask &= (
+                        chunk["daynight"]
+                        .astype(str)
+                        .str.upper()
+                        .eq(wanted)
+                    )
+
+                if mask.any():
+                    history.extend(
+                        chunk.loc[mask].to_dict("records")
+                    )
+
+                del chunk
+
+        except (
+            ImportError,
+            ModuleNotFoundError,
+            ValueError,
+            OSError,
+            KeyError,
         ):
-            dates = pd.to_datetime(chunk.get("acq_date"), errors="coerce")
-            mask = dates.lt(selected_ts) & dates.dt.month.eq(month)
-            if wanted in {"D", "N"} and "daynight" in chunk.columns:
-                mask &= chunk["daynight"].astype(str).str.upper().eq(wanted)
-            if mask.any():
-                history.extend(chunk.loc[mask].to_dict("records"))
+            history = []
 
     if not history:
         return {}
 
+    # --------------------------------------------------------
+    # GROUP BASELINE
+    # --------------------------------------------------------
     grouped: dict[str, list[dict]] = {}
+
     for item in history:
         key = item.get("region_key") or infer_region_key(item)
         grouped.setdefault(key, []).append(item)
 
     from app.engine import historical_baseline, aggregate_region_baseline
-    result = {}
+
+    result: dict[str, dict] = {}
+
     for key, rows in grouped.items():
         if len(rows) >= 3:
-            result[key] = aggregate_region_baseline(rows, historical_baseline(rows[0]))
+            result[key] = aggregate_region_baseline(
+                rows,
+                historical_baseline(rows[0]),
+            )
+
             result[key]["region_key"] = key
-            result[key]["region"] = f"GRID {key.replace('grid_', '').replace('_', ' / ')}"
-            result[key]["notes"] = f"2024 historical baseline: {len(rows)} observations before {acq_date}; month {month}; no future/test observations used."
+            result[key]["region"] = (
+                f"GRID {key.replace('grid_', '').replace('_', ' / ')}"
+            )
+            result[key]["notes"] = (
+                f"2024 historical baseline: {len(rows)} observations "
+                f"before {acq_date}; month {month}; "
+                f"no future/test observations used."
+            )
             result[key]["source"] = "2024 historical observations"
+
         else:
-            sample = {"latitude": 0, "longitude": 0, "acq_date": acq_date}
+            sample = {
+                "latitude": 0,
+                "longitude": 0,
+                "acq_date": acq_date,
+            }
+
             if key.startswith("grid_"):
                 try:
                     a, b = key[5:].split("_")[:2]
-                    sample["latitude"], sample["longitude"] = float(a) + 0.5, float(b) + 0.5
+                    sample["latitude"] = float(a) + 0.5
+                    sample["longitude"] = float(b) + 0.5
                 except Exception:
                     pass
-            result[key] = historical_baseline(sample)
-    return result
 
+            result[key] = historical_baseline(sample)
+
+    return result
 
 def list_hotspots() -> list[dict]:
     """Return FIRMS-shaped hotspot objects.
@@ -886,3 +993,4 @@ def nearby_for(hotspot: dict) -> list[dict]:
         item["display_name"] = name
         result.append(item)
     return result
+
