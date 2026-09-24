@@ -291,6 +291,17 @@ def _attach_stable_ids(rows: list[dict], acq_date: str | None) -> list[dict]:
             str(row.get("satellite") or ""),
             str(row.get("instrument") or ""),
         )
+        existing_id = row.get("fire_row_id")
+        if existing_id is not None and str(existing_id).strip():
+            try:
+                rid = int(float(existing_id))
+                if rid > 0:
+                    row["fire_row_id"] = rid
+                    row["id"] = f"F24-{rid}"
+                    continue
+            except (TypeError, ValueError):
+                pass
+
         rid = source_index.get(key)
         if rid:
             row["fire_row_id"] = int(rid)
