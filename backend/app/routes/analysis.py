@@ -21,6 +21,7 @@ def analysis(hotspot_id: str):
         baseline = historical_2024_baselines(
             hotspot["acq_date"],
             hotspot.get("daynight"),
+            hotspot.get("region_key"),
         ).get(hotspot.get("region_key"))
 
         if not baseline:

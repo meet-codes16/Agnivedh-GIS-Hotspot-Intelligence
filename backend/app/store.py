@@ -1,4 +1,4 @@
-﻿"""FIRMS-backed data store with a real runtime dataset.
+"""FIRMS-backed data store with a real runtime dataset.
 
 Prototype source of truth is the frontend mock JS files so both sides share
 the same FIRMS-shaped records.
@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 FRONTEND_DATA = ROOT / "frontend" / "src" / "data"
 
-# FUTURE CSV hook â€” keep this path; load when the file is present.
+# FUTURE CSV hook — keep this path; load when the file is present.
 FIRMS_CSV_PATH = DATA_DIR / "fires_runtime.csv"
 HOTSPOTS_2024_CSV_PATH = DATA_DIR / "hotspots_2024.csv"
 
@@ -367,7 +367,7 @@ def query_hotspots_2024(year: int = 2024, acq_date: str | None = None, daynight:
     if wanted_daynight not in {"", "D", "N"}:
         raise ValueError("daynight must be D, N, or omitted")
 
-    parquet_path = DATA_DIR / "hotspots_2024.parquet"
+    parquet_path = DATA_DIR / "hotspots_2024_optimized.parquet"
 
     reader = None
     if parquet_path.exists():
@@ -435,7 +435,7 @@ def query_hotspots_2024(year: int = 2024, acq_date: str | None = None, daynight:
 @lru_cache(maxsize=1)
 def _event_history_frame():
     """Cached compact 2024 event table loaded directly from Parquet/CSV."""
-    parquet_path = DATA_DIR / "hotspots_2024.parquet"
+    parquet_path = DATA_DIR / "hotspots_2024_optimized.parquet"
     columns = ["latitude", "longitude", "acq_date", "acq_time", "frp", "brightness", "bright_t31"]
     if parquet_path.exists():
         try:
@@ -471,7 +471,7 @@ def _load_event_window(
     Parquet predicate pushdown is used whenever possible. This intentionally
     avoids materialising the complete 2024 FIRMS dataset into pandas.
     """
-    parquet_path = DATA_DIR / "hotspots_2024.parquet"
+    parquet_path = DATA_DIR / "hotspots_2024_optimized.parquet"
     columns = [
         "latitude",
         "longitude",
@@ -1083,7 +1083,7 @@ def persistent_source_history(
     }
 
 
-def historical_2024_baselines(acq_date: str, daynight: str | None = None) -> dict[str, dict]:
+def historical_2024_baselines(acq_date: str, daynight: str | None = None, region_key: str | None = None) -> dict[str, dict]:
     """Build leakage-safe 2024 baselines without loading the full dataset.
 
     Only observations strictly before the selected date and belonging to the
@@ -1116,7 +1116,7 @@ def historical_2024_baselines(acq_date: str, daynight: str | None = None) -> dic
     ]
 
     history: list[dict] = []
-    parquet_path = DATA_DIR / "hotspots_2024.parquet"
+    parquet_path = DATA_DIR / "hotspots_2024_optimized.parquet"
 
     # --------------------------------------------------------
     # PARQUET PATH
@@ -1157,6 +1157,15 @@ def historical_2024_baselines(acq_date: str, daynight: str | None = None) -> dic
                         .astype(str)
                         .str.upper()
                         .eq(wanted)
+                    ]
+
+                if region_key and not frame.empty:
+                    region_keys = [
+                        infer_region_key(row)
+                        for row in frame.to_dict("records")
+                    ]
+                    frame = frame[
+                        pd.Series(region_keys, index=frame.index).eq(region_key)
                     ]
 
                 if not frame.empty:
@@ -1294,7 +1303,7 @@ def get_hotspot(hotspot_id: str) -> dict | None:
     if fire_row_id <= 0:
         return None
 
-    parquet_path = DATA_DIR / "hotspots_2024.parquet"
+    parquet_path = DATA_DIR / "hotspots_2024_optimized.parquet"
     if parquet_path.exists():
         try:
             # F24-* is the stable source row id, not a positional index. This
@@ -1356,4 +1365,5 @@ def nearby_for(hotspot: dict) -> list[dict]:
         item["display_name"] = name
         result.append(item)
     return result
+
 
