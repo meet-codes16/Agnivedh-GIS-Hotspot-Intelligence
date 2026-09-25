@@ -1,3 +1,4 @@
+import { apiUrl } from "./utils/api";
 import { useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { ChevronDown, ChevronUp } from "lucide-react";
 import ClassificationPanel from "./components/ClassificationPanel";
@@ -171,7 +172,7 @@ async function handleSelect(id) {
     setOsmElapsedSeconds(0);
 
     try {
-      const analysisRes = await fetch(`/api/analysis/${id}`);
+      const analysisRes = await fetch(apiUrl(`/api/analysis/${id}`));
       const analysisPayload = await analysisRes.json();
       if (analysisRes.ok) {
         setSelectedAnalysis(analysisPayload);
@@ -215,7 +216,7 @@ async function handleSelect(id) {
       } else {
         const params = new URLSearchParams({ year: fetchYear, acq_date: fetchDate });
       if (fetchDaynight !== "ALL") params.set("daynight", fetchDaynight);
-      const res = await fetch(`/api/hotspots/query?${params.toString()}`);
+      const res = await fetch(apiUrl(`/api/hotspots/query?${params.toString()}`));
       payload = await res.json();
       if (!res.ok) throw new Error(payload?.detail || "Unable to fetch hotspots");
 
@@ -556,6 +557,9 @@ async function handleSelect(id) {
     </div>
   );
 }
+
+
+
 
 
 

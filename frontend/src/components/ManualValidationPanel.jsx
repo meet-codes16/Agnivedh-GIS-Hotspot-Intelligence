@@ -1,3 +1,4 @@
+import { apiUrl } from "../utils/api";
 import { useState } from "react";
 
 const WORLD_COVER = [
@@ -36,7 +37,7 @@ export default function ManualValidationPanel({ onManualResult }) {
         type: Number(form.type),
         worldcover_code: form.worldcover_code ? Number(form.worldcover_code) : null,
       };
-      const res = await fetch("/api/validation/manual", {
+      const res = await fetch(apiUrl("/api/validation/manual"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -148,6 +149,10 @@ export default function ManualValidationPanel({ onManualResult }) {
     </div>
   );
 }
+
+
+
+
 
 
 
