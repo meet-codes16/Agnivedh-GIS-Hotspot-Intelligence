@@ -461,13 +461,180 @@ def _event_history_frame():
     return frame.dropna(subset=["latitude", "longitude", "timestamp"]).reset_index(drop=True)
 
 
-def recent_event_context(hotspot: dict, radius_km: float = 5.0, hours: int = 72) -> dict:
-    """Return prior-event context plus contemporaneous same-pass clustering.
+def _load_event_window(
+    ts: pd.Timestamp,
+    start_ts: pd.Timestamp | None = None,
+    end_ts: pd.Timestamp | None = None,
+) -> pd.DataFrame:
+    """Load only the small temporal slice required for selected-hotspot context.
 
-    Prior observations are restricted to timestamps strictly before the selected
-    hotspot.  Same-pass detections are a separate signal because multiple pixels
-    detected in the same satellite pass are available at the same observation
-    time and can indicate a spatially coherent event.
+    Parquet predicate pushdown is used whenever possible. This intentionally
+    avoids materialising the complete 2024 FIRMS dataset into pandas.
+    """
+    parquet_path = DATA_DIR / "hotspots_2024.parquet"
+    columns = [
+        "latitude",
+        "longitude",
+        "acq_date",
+        "acq_time",
+        "frp",
+        "brightness",
+        "bright_t31",
+    ]
+
+    start_ts = start_ts if start_ts is not None else ts
+    end_ts = end_ts if end_ts is not None else ts
+
+    frames: list[pd.DataFrame] = []
+
+    if parquet_path.exists():
+        try:
+            start_date = start_ts.strftime("%Y-%m-%d")
+            end_date = end_ts.strftime("%Y-%m-%d")
+
+            filters = [
+                ("acq_date", ">=", start_date),
+                ("acq_date", "<=", end_date),
+            ]
+
+            frame = pd.read_parquet(
+                parquet_path,
+                columns=columns,
+                filters=[filters],
+                engine="pyarrow",
+            )
+
+            if not frame.empty:
+                raw_time = pd.to_numeric(
+                    frame["acq_time"],
+                    errors="coerce",
+                ).fillna(0).astype(int)
+
+                frame["timestamp"] = pd.to_datetime(
+                    frame["acq_date"].astype(str)
+                    + " "
+                    + raw_time.astype(str).str.zfill(4),
+                    format="%Y-%m-%d %H%M",
+                    errors="coerce",
+                )
+
+                frame = frame[
+                    frame["timestamp"].notna()
+                    & frame["timestamp"].between(
+                        start_ts,
+                        end_ts,
+                        inclusive="both",
+                    )
+                ].copy()
+
+                frames.append(frame)
+
+        except (
+            ImportError,
+            ModuleNotFoundError,
+            ValueError,
+            OSError,
+            KeyError,
+        ):
+            frames = []
+
+    # CSV is a fallback only when Parquet is unavailable/unreadable.
+    if not frames and HOTSPOTS_2024_CSV_PATH.exists():
+        try:
+            for chunk in pd.read_csv(
+                HOTSPOTS_2024_CSV_PATH,
+                usecols=columns,
+                low_memory=False,
+                chunksize=50000,
+            ):
+                raw_time = pd.to_numeric(
+                    chunk["acq_time"],
+                    errors="coerce",
+                ).fillna(0).astype(int)
+
+                chunk["timestamp"] = pd.to_datetime(
+                    chunk["acq_date"].astype(str)
+                    + " "
+                    + raw_time.astype(str).str.zfill(4),
+                    format="%Y-%m-%d %H%M",
+                    errors="coerce",
+                )
+
+                mask = (
+                    chunk["timestamp"].notna()
+                    & chunk["timestamp"].between(
+                        start_ts,
+                        end_ts,
+                        inclusive="both",
+                    )
+                )
+
+                if mask.any():
+                    frames.append(chunk.loc[mask].copy())
+
+                del chunk
+
+        except (
+            ImportError,
+            ModuleNotFoundError,
+            ValueError,
+            OSError,
+            KeyError,
+        ):
+            frames = []
+
+    if not frames:
+        return pd.DataFrame(
+            columns=[
+                "latitude",
+                "longitude",
+                "acq_date",
+                "acq_time",
+                "frp",
+                "brightness",
+                "bright_t31",
+                "timestamp",
+            ]
+        )
+
+    frame = pd.concat(frames, ignore_index=True)
+
+    frame["latitude"] = pd.to_numeric(
+        frame["latitude"],
+        errors="coerce",
+    )
+    frame["longitude"] = pd.to_numeric(
+        frame["longitude"],
+        errors="coerce",
+    )
+    frame["frp"] = pd.to_numeric(
+        frame["frp"],
+        errors="coerce",
+    ).fillna(0.0)
+    frame["brightness"] = pd.to_numeric(
+        frame["brightness"],
+        errors="coerce",
+    ).fillna(0.0)
+    frame["bright_t31"] = pd.to_numeric(
+        frame["bright_t31"],
+        errors="coerce",
+    ).fillna(0.0)
+    frame["acq_date"] = frame["acq_date"].astype(str)
+
+    return frame.dropna(
+        subset=["latitude", "longitude", "timestamp"]
+    ).reset_index(drop=True)
+
+
+def recent_event_context(
+    hotspot: dict,
+    radius_km: float = 5.0,
+    hours: int = 72,
+) -> dict:
+    """Return leakage-safe prior-event and same-pass context.
+
+    Only the requested temporal window is read from the 2024 dataset.
+    No full-dataset pandas frame is materialised.
     """
     empty = {
         "nearby_count_24h": 0,
@@ -476,20 +643,32 @@ def recent_event_context(hotspot: dict, radius_km: float = 5.0, hours: int = 72)
         "same_pass_count": 0,
         "nearest_distance_km": None,
     }
+
     try:
         lat = float(hotspot.get("latitude") or 0)
         lon = float(hotspot.get("longitude") or 0)
+
         ts = pd.to_datetime(
-            f"{hotspot.get('acq_date', '')} {str(hotspot.get('acq_time') or '0000').zfill(4)}",
+            f"{hotspot.get('acq_date', '')} "
+            f"{str(hotspot.get('acq_time') or '0000').zfill(4)}",
             format="%Y-%m-%d %H%M",
             errors="coerce",
         )
+
         if pd.isna(ts):
             return empty
+
     except Exception:
         return empty
 
-    frame = _event_history_frame()
+    start = ts - pd.Timedelta(hours=hours)
+
+    frame = _load_event_window(
+        ts,
+        start_ts=start,
+        end_ts=ts,
+    )
+
     if frame.empty:
         return empty
 
@@ -497,32 +676,82 @@ def recent_event_context(hotspot: dict, radius_km: float = 5.0, hours: int = 72)
     lon1 = math.radians(lon)
 
     # Same satellite-pass/time spatial cluster.
-    same_pass = frame[frame["timestamp"] == ts].copy()
+    same_pass = frame[
+        frame["timestamp"] == ts
+    ]
+
     same_pass_count = 0
+
     if not same_pass.empty:
-        lat2 = same_pass["latitude"].to_numpy(dtype=float) * math.pi / 180.0
-        lon2 = same_pass["longitude"].to_numpy(dtype=float) * math.pi / 180.0
+        lat2 = (
+            same_pass["latitude"].to_numpy(dtype=float)
+            * math.pi / 180.0
+        )
+        lon2 = (
+            same_pass["longitude"].to_numpy(dtype=float)
+            * math.pi / 180.0
+        )
+
         dlat = lat2 - lat1
         dlon = lon2 - lon1
-        a = np.sin(dlat / 2.0) ** 2 + math.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2.0) ** 2
-        distances = 6371.0088 * 2.0 * np.arcsin(np.sqrt(np.clip(a, 0.0, 1.0)))
-        same_pass_count = int(((distances <= radius_km) & (distances > 0.001)).sum())
 
-    # Strictly prior temporal context â€” never use future observations here.
-    start = ts - pd.Timedelta(hours=hours)
-    h = frame[(frame["timestamp"] < ts) & (frame["timestamp"] >= start)].copy()
+        a = (
+            np.sin(dlat / 2.0) ** 2
+            + math.cos(lat1)
+            * np.cos(lat2)
+            * np.sin(dlon / 2.0) ** 2
+        )
+
+        distances = (
+            6371.0088
+            * 2.0
+            * np.arcsin(np.sqrt(np.clip(a, 0.0, 1.0)))
+        )
+
+        same_pass_count = int(
+            (
+                (distances <= radius_km)
+                & (distances > 0.001)
+            ).sum()
+        )
+
+    # Strictly prior observations only.
+    h = frame[
+        (frame["timestamp"] < ts)
+        & (frame["timestamp"] >= start)
+    ].copy()
+
     if h.empty:
         return {
             **empty,
             "same_pass_count": same_pass_count,
         }
 
-    lat2 = h["latitude"].to_numpy(dtype=float) * math.pi / 180.0
-    lon2 = h["longitude"].to_numpy(dtype=float) * math.pi / 180.0
+    lat2 = (
+        h["latitude"].to_numpy(dtype=float)
+        * math.pi / 180.0
+    )
+    lon2 = (
+        h["longitude"].to_numpy(dtype=float)
+        * math.pi / 180.0
+    )
+
     dlat = lat2 - lat1
     dlon = lon2 - lon1
-    a = np.sin(dlat / 2.0) ** 2 + math.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2.0) ** 2
-    distances = 6371.0088 * 2.0 * np.arcsin(np.sqrt(np.clip(a, 0.0, 1.0)))
+
+    a = (
+        np.sin(dlat / 2.0) ** 2
+        + math.cos(lat1)
+        * np.cos(lat2)
+        * np.sin(dlon / 2.0) ** 2
+    )
+
+    distances = (
+        6371.0088
+        * 2.0
+        * np.arcsin(np.sqrt(np.clip(a, 0.0, 1.0)))
+    )
+
     h["distance_km"] = distances
     h = h[h["distance_km"] <= radius_km]
 
@@ -532,17 +761,22 @@ def recent_event_context(hotspot: dict, radius_km: float = 5.0, hours: int = 72)
             "same_pass_count": same_pass_count,
         }
 
-    recent_24 = h[h["timestamp"] >= ts - pd.Timedelta(hours=24)]
+    recent_24 = h[
+        h["timestamp"] >= ts - pd.Timedelta(hours=24)
+    ]
+
     return {
         "nearby_count_24h": int(len(recent_24)),
         "nearby_count_72h": int(len(h)),
         "distinct_dates_72h": int(h["acq_date"].nunique()),
         "same_pass_count": same_pass_count,
-        "nearest_distance_km": round(float(h["distance_km"].min()), 3),
+        "nearest_distance_km": round(
+            float(h["distance_km"].min()),
+            3,
+        ),
     }
 
 
-@lru_cache(maxsize=1)
 def _event_grid_index():
     """Compact spatial-temporal index for fast batch event association.
 
@@ -612,79 +846,207 @@ def recent_event_context_fast(hotspot: dict) -> dict:
         "nearest_distance_km": None,
     }
 
-def persistent_source_history(hotspot: dict, radius_km: float = 5.0) -> dict:
-    """Return a leakage-safe 2024 thermal-source history around one detection.
+def persistent_source_history(
+    hotspot: dict,
+    radius_km: float = 5.0,
+) -> dict:
+    """Return leakage-safe 2024 thermal-source history around one detection.
 
-    This is intentionally a *source history*, not a claim that every detection is
-    the same continuous fire. Repeated detections at the same location are used
-    to distinguish transient activity from persistent/recurrent thermal sources.
+    Only observations up to the selected hotspot timestamp are considered.
+    The loader first restricts the Parquet read by date and then applies the
+    exact spatial Haversine test.
     """
     try:
         lat = float(hotspot.get("latitude") or 0)
         lon = float(hotspot.get("longitude") or 0)
+
         ts = pd.to_datetime(
-            f"{hotspot.get('acq_date', '')} {str(hotspot.get('acq_time') or '0000').zfill(4)}",
+            f"{hotspot.get('acq_date', '')} "
+            f"{str(hotspot.get('acq_time') or '0000').zfill(4)}",
             format="%Y-%m-%d %H%M",
             errors="coerce",
         )
+
         if pd.isna(ts):
             raise ValueError
+
     except Exception:
-        return {"status": "UNAVAILABLE", "reason": "Invalid hotspot timestamp or coordinates.", "timeline": []}
+        return {
+            "status": "UNAVAILABLE",
+            "reason": "Invalid hotspot timestamp or coordinates.",
+            "timeline": [],
+        }
 
-    frame = _event_history_frame()
+    # Date-bounded read. This avoids materialising the entire 2024 dataset.
+    frame = _load_event_window(
+        ts,
+        start_ts=pd.Timestamp("2024-01-01"),
+        end_ts=ts,
+    )
+
     if frame.empty:
-        return {"status": "UNAVAILABLE", "reason": "2024 event history unavailable.", "timeline": []}
+        return {
+            "status": "TRANSIENT",
+            "detection_count": 1,
+            "active_days": 1,
+            "first_seen": str(hotspot.get("acq_date")),
+            "last_seen": str(hotspot.get("acq_date")),
+            "duration_days": 0,
+            "timeline": [
+                {
+                    "date": str(hotspot.get("acq_date")),
+                    "count": 1,
+                    "max_frp": float(hotspot.get("frp") or 0),
+                }
+            ],
+        }
 
-    # Candidate cells first; exact haversine distance is applied afterwards.
+    # Candidate cells first; exact Haversine distance follows.
     c_lat = math.floor(lat / 0.05)
     c_lon = math.floor(lon / 0.05)
+
+    frame["cell_lat"] = np.floor(
+        frame["latitude"].to_numpy(dtype=float) / 0.05
+    ).astype(np.int32)
+
+    frame["cell_lon"] = np.floor(
+        frame["longitude"].to_numpy(dtype=float) / 0.05
+    ).astype(np.int32)
+
     candidates = frame[
         frame["cell_lat"].between(c_lat - 1, c_lat + 1)
         & frame["cell_lon"].between(c_lon - 1, c_lon + 1)
         & (frame["timestamp"] <= ts)
     ].copy()
+
     if candidates.empty:
-        return {"status": "TRANSIENT", "detection_count": 1, "active_days": 1, "first_seen": str(hotspot.get("acq_date")), "last_seen": str(hotspot.get("acq_date")), "duration_days": 0, "timeline": [{"date": str(hotspot.get("acq_date")), "count": 1, "max_frp": float(hotspot.get("frp") or 0)}]}
+        return {
+            "status": "TRANSIENT",
+            "detection_count": 1,
+            "active_days": 1,
+            "first_seen": str(hotspot.get("acq_date")),
+            "last_seen": str(hotspot.get("acq_date")),
+            "duration_days": 0,
+            "timeline": [
+                {
+                    "date": str(hotspot.get("acq_date")),
+                    "count": 1,
+                    "max_frp": float(hotspot.get("frp") or 0),
+                }
+            ],
+        }
 
     lat1 = math.radians(lat)
     lon1 = math.radians(lon)
-    lat2 = candidates["latitude"].to_numpy(dtype=float) * math.pi / 180.0
-    lon2 = candidates["longitude"].to_numpy(dtype=float) * math.pi / 180.0
+
+    lat2 = (
+        candidates["latitude"].to_numpy(dtype=float)
+        * math.pi / 180.0
+    )
+    lon2 = (
+        candidates["longitude"].to_numpy(dtype=float)
+        * math.pi / 180.0
+    )
+
     dlat = lat2 - lat1
     dlon = lon2 - lon1
-    a = np.sin(dlat / 2.0) ** 2 + math.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2.0) ** 2
-    distances = 6371.0088 * 2.0 * np.arcsin(np.sqrt(np.clip(a, 0.0, 1.0)))
-    h = candidates[distances <= radius_km].copy()
-    if h.empty:
-        h = pd.DataFrame([{
-            "acq_date": str(hotspot.get("acq_date")),
-            "timestamp": ts,
-            "frp": float(hotspot.get("frp") or 0),
-        }])
 
-    active_dates = sorted(set(h["acq_date"].astype(str)))
-    first_seen = active_dates[0] if active_dates else str(hotspot.get("acq_date"))
-    last_seen = active_dates[-1] if active_dates else str(hotspot.get("acq_date"))
-    duration_days = max(0, (pd.Timestamp(last_seen) - pd.Timestamp(first_seen)).days)
+    a = (
+        np.sin(dlat / 2.0) ** 2
+        + math.cos(lat1)
+        * np.cos(lat2)
+        * np.sin(dlon / 2.0) ** 2
+    )
+
+    distances = (
+        6371.0088
+        * 2.0
+        * np.arcsin(np.sqrt(np.clip(a, 0.0, 1.0)))
+    )
+
+    h = candidates[
+        distances <= radius_km
+    ].copy()
+
+    if h.empty:
+        h = pd.DataFrame(
+            [{
+                "acq_date": str(hotspot.get("acq_date")),
+                "timestamp": ts,
+                "frp": float(hotspot.get("frp") or 0),
+            }]
+        )
+
+    active_dates = sorted(
+        set(h["acq_date"].astype(str))
+    )
+
+    first_seen = (
+        active_dates[0]
+        if active_dates
+        else str(hotspot.get("acq_date"))
+    )
+
+    last_seen = (
+        active_dates[-1]
+        if active_dates
+        else str(hotspot.get("acq_date"))
+    )
+
+    duration_days = max(
+        0,
+        (
+            pd.Timestamp(last_seen)
+            - pd.Timestamp(first_seen)
+        ).days,
+    )
+
     detection_count = int(len(h))
     active_days = int(len(active_dates))
 
-    timeline_df = h.groupby("acq_date", as_index=False).agg(
+    timeline_df = h.groupby(
+        "acq_date",
+        as_index=False,
+    ).agg(
         count=("acq_date", "size"),
         max_frp=("frp", "max"),
     )
+
     timeline_df = timeline_df.sort_values("acq_date")
-    # Keep the panel compact while preserving the complete counts in summary fields.
+
     timeline = [
-        {"date": str(r.acq_date), "count": int(r.count), "max_frp": round(float(r.max_frp), 2)}
+        {
+            "date": str(r.acq_date),
+            "count": int(r.count),
+            "max_frp": round(float(r.max_frp), 2),
+        }
         for r in timeline_df.tail(18).itertuples(index=False)
     ]
 
-    current_frp = float(hotspot.get("frp") or 0)
-    historical_frp = h.loc[h["timestamp"] < ts, "frp"]
-    median_frp = float(historical_frp.median()) if not historical_frp.empty else current_frp
-    spike_ratio = current_frp / median_frp if median_frp > 0 else (2.0 if current_frp > 0 else 1.0)
+    current_frp = float(
+        hotspot.get("frp") or 0
+    )
+
+    historical_frp = h.loc[
+        h["timestamp"] < ts,
+        "frp",
+    ]
+
+    median_frp = (
+        float(historical_frp.median())
+        if not historical_frp.empty
+        else current_frp
+    )
+
+    spike_ratio = (
+        current_frp / median_frp
+        if median_frp > 0
+        else (
+            2.0
+            if current_frp > 0
+            else 1.0
+        )
+    )
 
     if active_days >= 5 and duration_days >= 14:
         behaviour = "PERSISTENT THERMAL SOURCE"
@@ -713,8 +1075,9 @@ def persistent_source_history(hotspot: dict, radius_km: float = 5.0) -> dict:
         "frp_spike_ratio": round(spike_ratio, 2),
         "timeline": timeline,
         "interpretation": (
-            "Repeated thermal detections at a stable location; this does not mean one continuous fire." 
-            if behaviour != "TRANSIENT ACTIVITY" else
+            "Repeated thermal detections at a stable location; this does not mean one continuous fire."
+            if behaviour != "TRANSIENT ACTIVITY"
+            else
             "Few nearby detections in 2024; persistence is not established."
         ),
     }
