@@ -1,4 +1,4 @@
-"""
+﻿"""
 OpenStreetMap nearby facility enrichment for AgniVedh.
 
 Strategy:
@@ -30,9 +30,9 @@ OVERPASS_URLS = [
 
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/reverse"
 
-OSM_TIMEOUT = 12
-OSM_QUERY_TIMEOUT = 8
-NOMINATIM_TIMEOUT = 15
+OSM_TIMEOUT = (3.05, 4.0)
+OSM_QUERY_TIMEOUT = 5
+NOMINATIM_TIMEOUT = (0.2, 0.3)
 
 MAX_QUERY_RADIUS_M = 1000
 
@@ -190,80 +190,77 @@ out center tags;
 
 def _run_overpass(query: str):
 
-    for url in OVERPASS_URLS:
+    if not OVERPASS_URLS:
+        return None
+
+    url = OVERPASS_URLS[0]
+
+    try:
+
+        response = requests.post(
+            url,
+            data=query,
+            timeout=OSM_TIMEOUT,
+            headers={
+                "User-Agent": USER_AGENT,
+                "Accept": "application/json",
+            },
+        )
+
+        if response.status_code != 200:
+
+            print(
+                f"[OSM] {url} FAILED: "
+                f"HTTP {response.status_code}"
+            )
+
+            return None
 
         try:
+            data = response.json()
 
-            response = requests.post(
-                url,
-                data=query,
-                timeout=OSM_TIMEOUT,
-                headers={
-                    "User-Agent": USER_AGENT,
-                    "Accept": "application/json",
-                },
-            )
-
-            if response.status_code != 200:
-
-                print(
-                    f"[OSM] {url} FAILED: "
-                    f"HTTP {response.status_code}"
-                )
-
-                continue
-
-            try:
-                data = response.json()
-
-            except ValueError as exc:
-
-                print(
-                    f"[OSM] {url} FAILED: "
-                    f"invalid JSON: {exc}"
-                )
-
-                continue
-
-            if not isinstance(data, dict):
-
-                print(
-                    f"[OSM] {url} FAILED: "
-                    f"invalid response object"
-                )
-
-                continue
-
-            return data
-
-        except requests.Timeout:
+        except ValueError as exc:
 
             print(
                 f"[OSM] {url} FAILED: "
-                f"timeout after {OSM_TIMEOUT}s"
+                f"invalid JSON: {exc}"
             )
 
-        except requests.RequestException as exc:
+            return None
+
+        if not isinstance(data, dict):
 
             print(
                 f"[OSM] {url} FAILED: "
-                f"{type(exc).__name__}: {exc}"
+                f"invalid response object"
             )
 
-        except Exception as exc:
+            return None
 
-            print(
-                f"[OSM] {url} FAILED: "
-                f"{type(exc).__name__}: {exc}"
-            )
+        return data
+
+    except requests.Timeout:
+
+        print(
+            f"[OSM] {url} FAILED: "
+            f"timeout after {OSM_TIMEOUT}s"
+        )
+
+    except requests.RequestException as exc:
+
+        print(
+            f"[OSM] {url} FAILED: "
+            f"{type(exc).__name__}: {exc}"
+        )
+
+    except Exception as exc:
+
+        print(
+            f"[OSM] {url} FAILED: "
+            f"{type(exc).__name__}: {exc}"
+        )
 
     return None
-
-
-# ---------------------------------------------------------------------
-# OSM FACILITY CLASSIFICATION
-# ---------------------------------------------------------------------
-
 def _facility_category(tags: Dict[str, Any]) -> str:
 
     landuse = str(
@@ -954,3 +951,9 @@ def nearby_osm_features(
         "nearby",
         [],
     )
+
+
+
+
+
+
