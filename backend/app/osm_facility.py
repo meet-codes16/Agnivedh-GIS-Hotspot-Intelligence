@@ -1,4 +1,4 @@
-﻿"""
+"""
 OpenStreetMap nearby facility enrichment for AgniVedh.
 
 Strategy:
@@ -30,9 +30,11 @@ OVERPASS_URLS = [
 
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/reverse"
 
-OSM_TIMEOUT = (3.05, 4.0)
-OSM_QUERY_TIMEOUT = 5
-NOMINATIM_TIMEOUT = (0.2, 0.3)
+# Keep OSM enrichment bounded so a busy public endpoint cannot stall
+# the complete AgniVedh analysis for tens of seconds.
+OSM_TIMEOUT = 3.5
+OSM_QUERY_TIMEOUT = 3
+NOMINATIM_TIMEOUT = 4
 
 MAX_QUERY_RADIUS_M = 1000
 
@@ -164,24 +166,26 @@ def _named_facility_query(
         min(int(radius_m), MAX_QUERY_RADIUS_M),
     )
 
+    # Query named facilities only. This substantially reduces the amount
+    # of OSM data returned while preserving actual facility names.
     return f"""
 [out:json][timeout:{OSM_QUERY_TIMEOUT}];
 
 (
-  nwr["power"="plant"](around:{radius_m},{lat},{lon});
-  nwr["power"="generator"](around:{radius_m},{lat},{lon});
-  nwr["power"="substation"](around:{radius_m},{lat},{lon});
+  nwr["power"="plant"]["name"](around:{radius_m},{lat},{lon});
+  nwr["power"="generator"]["name"](around:{radius_m},{lat},{lon});
+  nwr["power"="substation"]["name"](around:{radius_m},{lat},{lon});
 
-  nwr["landuse"="industrial"](around:{radius_m},{lat},{lon});
-  nwr["industrial"](around:{radius_m},{lat},{lon});
+  nwr["landuse"="industrial"]["name"](around:{radius_m},{lat},{lon});
+  nwr["industrial"]["name"](around:{radius_m},{lat},{lon});
 
-  nwr["man_made"="works"](around:{radius_m},{lat},{lon});
-  nwr["man_made"="factory"](around:{radius_m},{lat},{lon});
-  nwr["man_made"="refinery"](around:{radius_m},{lat},{lon});
+  nwr["man_made"="works"]["name"](around:{radius_m},{lat},{lon});
+  nwr["man_made"="factory"]["name"](around:{radius_m},{lat},{lon});
+  nwr["man_made"="refinery"]["name"](around:{radius_m},{lat},{lon});
 
-  nwr["generator:source"="nuclear"](around:{radius_m},{lat},{lon});
+  nwr["generator:source"="nuclear"]["name"](around:{radius_m},{lat},{lon});
 
-  nwr["landuse"="military"](around:{radius_m},{lat},{lon});
+  nwr["landuse"="military"]["name"](around:{radius_m},{lat},{lon});
 );
 
 out center tags;
@@ -190,77 +194,83 @@ out center tags;
 
 def _run_overpass(query: str):
 
-    if not OVERPASS_URLS:
-        return None
-
-    url = OVERPASS_URLS[0]
-
-    try:
-
-        response = requests.post(
-            url,
-            data=query,
-            timeout=OSM_TIMEOUT,
-            headers={
-                "User-Agent": USER_AGENT,
-                "Accept": "application/json",
-            },
-        )
-
-        if response.status_code != 200:
-
-            print(
-                f"[OSM] {url} FAILED: "
-                f"HTTP {response.status_code}"
-            )
-
-            return None
+    # Try the two commonly available public endpoints, but do not walk
+    # through all endpoints for every request. The short timeout keeps
+    # OSM enrichment from blocking the main analysis for ~40 seconds.
+    for url in OVERPASS_URLS[:2]:
 
         try:
-            data = response.json()
 
-        except ValueError as exc:
+            response = requests.post(
+                url,
+                data=query,
+                timeout=OSM_TIMEOUT,
+                headers={
+                    "User-Agent": USER_AGENT,
+                    "Accept": "application/json",
+                },
+            )
+
+            if response.status_code != 200:
+
+                print(
+                    f"[OSM] {url} FAILED: "
+                    f"HTTP {response.status_code}"
+                )
+
+                continue
+
+            try:
+                data = response.json()
+
+            except ValueError as exc:
+
+                print(
+                    f"[OSM] {url} FAILED: "
+                    f"invalid JSON: {exc}"
+                )
+
+                continue
+
+            if not isinstance(data, dict):
+
+                print(
+                    f"[OSM] {url} FAILED: "
+                    f"invalid response object"
+                )
+
+                continue
+
+            return data
+
+        except requests.Timeout:
 
             print(
                 f"[OSM] {url} FAILED: "
-                f"invalid JSON: {exc}"
+                f"timeout after {OSM_TIMEOUT}s"
             )
 
-            return None
-
-        if not isinstance(data, dict):
+        except requests.RequestException as exc:
 
             print(
                 f"[OSM] {url} FAILED: "
-                f"invalid response object"
+                f"{type(exc).__name__}: {exc}"
             )
 
-            return None
+        except Exception as exc:
 
-        return data
-
-    except requests.Timeout:
-
-        print(
-            f"[OSM] {url} FAILED: "
-            f"timeout after {OSM_TIMEOUT}s"
-        )
-
-    except requests.RequestException as exc:
-
-        print(
-            f"[OSM] {url} FAILED: "
-            f"{type(exc).__name__}: {exc}"
-        )
-
-    except Exception as exc:
-
-        print(
-            f"[OSM] {url} FAILED: "
-            f"{type(exc).__name__}: {exc}"
-        )
+            print(
+                f"[OSM] {url} FAILED: "
+                f"{type(exc).__name__}: {exc}"
+            )
 
     return None
+
+
+# ---------------------------------------------------------------------
+# OSM FACILITY CLASSIFICATION
+# ---------------------------------------------------------------------
+
 def _facility_category(tags: Dict[str, Any]) -> str:
 
     landuse = str(
@@ -535,6 +545,222 @@ def _nominatim_reverse(
     return None
 
 
+
+def _nominatim_search(
+    lat: float,
+    lon: float,
+    radius_m: int,
+):
+    """Find actual named OSM facilities near the hotspot.
+
+    This is only used after Overpass fails. A bounded search keeps the
+    fallback local and avoids fabricating any facility information.
+    """
+
+    radius_m = max(
+        250,
+        min(int(radius_m), MAX_QUERY_RADIUS_M),
+    )
+
+    lat_delta = radius_m / 111320.0
+    lon_delta = radius_m / (
+        111320.0 * max(0.2, math.cos(math.radians(lat)))
+    )
+
+    viewbox = ",".join(
+        [
+            str(lon - lon_delta),
+            str(lat + lat_delta),
+            str(lon + lon_delta),
+            str(lat - lat_delta),
+        ]
+    )
+
+    # A single broad OSM search is preferable to several sequential
+    # Nominatim calls because public Nominatim instances are rate limited.
+    queries = (
+        "industrial factory power plant refinery substation",
+    )
+
+    for query in queries:
+
+        try:
+
+            response = requests.get(
+                "https://nominatim.openstreetmap.org/search",
+                params={
+                    "q": query,
+                    "format": "jsonv2",
+                    "limit": 20,
+                    "addressdetails": 1,
+                    "namedetails": 1,
+                    "viewbox": viewbox,
+                    "bounded": 1,
+                },
+                headers={
+                    "User-Agent": USER_AGENT,
+                    "Accept": "application/json",
+                },
+                timeout=NOMINATIM_TIMEOUT,
+            )
+
+            if response.status_code != 200:
+                print(
+                    "[OSM-NOMINATIM] search FAILED: "
+                    f"HTTP {response.status_code}"
+                )
+                continue
+
+            data = response.json()
+
+            if not isinstance(data, list):
+                continue
+
+            facilities = []
+
+            for item in data:
+
+                if not isinstance(item, dict):
+                    continue
+
+                name = (
+                    (item.get("name") or "").strip()
+                    if isinstance(item.get("name"), str)
+                    else ""
+                )
+
+                if not name:
+                    display_name = item.get("display_name") or ""
+                    name = str(display_name).split(",")[0].strip()
+
+                if not name:
+                    continue
+
+                item_lat = _safe_float(item.get("lat"))
+                item_lon = _safe_float(item.get("lon"))
+
+                if item_lat is None or item_lon is None:
+                    continue
+
+                distance = _distance_km(
+                    lat,
+                    lon,
+                    item_lat,
+                    item_lon,
+                )
+
+                if distance > radius_m / 1000.0:
+                    continue
+
+                category = str(
+                    item.get("category") or ""
+                ).lower()
+
+                item_type = str(
+                    item.get("type") or ""
+                ).lower()
+
+                address = item.get("address") or {}
+
+                address_text = " ".join(
+                    str(address.get(k) or "").lower()
+                    for k in (
+                        "industrial",
+                        "factory",
+                        "plant",
+                        "refinery",
+                        "warehouse",
+                        "power",
+                    )
+                )
+
+                combined = " ".join(
+                    (
+                        name.lower(),
+                        category,
+                        item_type,
+                        address_text,
+                    )
+                )
+
+                if not any(
+                    token in combined
+                    for token in (
+                        "industrial",
+                        "factory",
+                        "plant",
+                        "refinery",
+                        "substation",
+                        "power",
+                        "generator",
+                        "warehouse",
+                    )
+                ):
+                    continue
+
+                critical = None
+
+                if any(
+                    token in combined
+                    for token in (
+                        "power plant",
+                        "power station",
+                        "substation",
+                        "generator",
+                        "nuclear",
+                        "military",
+                    )
+                ):
+                    critical = (
+                        "Critical Power Infrastructure"
+                        if "military" not in combined
+                        else "Military Installation"
+                    )
+
+                facilities.append(
+                    {
+                        "id": (
+                            f"osm-{item.get('osm_type', 'unknown')}-"
+                            f"{item.get('osm_id', 'unknown')}"
+                        ),
+                        "osm_type": item.get("osm_type"),
+                        "osm_id": item.get("osm_id"),
+                        "name": name,
+                        "display_name": name,
+                        "distance_km": round(distance, 2),
+                        "latitude": round(item_lat, 6),
+                        "longitude": round(item_lon, 6),
+                        "source": "OpenStreetMap",
+                        "category": (
+                            critical
+                            or "Industrial Facility"
+                        ),
+                        "_critical": critical is not None,
+                    }
+                )
+
+            if facilities:
+                return facilities
+
+        except requests.Timeout:
+            print("[OSM-NOMINATIM] search FAILED: timeout")
+
+        except requests.RequestException as exc:
+            print(
+                "[OSM-NOMINATIM] search FAILED: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+        except Exception as exc:
+            print(
+                "[OSM-NOMINATIM] search FAILED: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+    return []
+
+
+
 def _nominatim_facility(
     lat: float,
     lon: float,
@@ -738,24 +964,45 @@ def nearest_osm_context(
             "Trying Nominatim fallback..."
         )
 
-        nominatim_facility = (
-            _nominatim_facility(
-                lat,
-                lon,
-            )
+        nominatim_facilities = _nominatim_search(
+            lat,
+            lon,
+            radius_m,
         )
 
-        if nominatim_facility:
+        if nominatim_facilities:
 
-            facilities.append(
-                nominatim_facility
+            facilities.extend(
+                nominatim_facilities
             )
 
             print(
                 "[OSM-NOMINATIM] "
-                f"Found: "
-                f"{nominatim_facility.get('name')}"
+                f"Found {len(nominatim_facilities)} "
+                "nearby named facility/facilities"
             )
+
+        else:
+
+            # Last fallback: preserve the original reverse-geocoding
+            # behavior for cases where the hotspot itself is mapped
+            # inside an industrial feature.
+            nominatim_facility = _nominatim_facility(
+                lat,
+                lon,
+            )
+
+            if nominatim_facility:
+
+                facilities.append(
+                    nominatim_facility
+                )
+
+                print(
+                    "[OSM-NOMINATIM] "
+                    f"Found: "
+                    f"{nominatim_facility.get('name')}"
+                )
 
     # -------------------------------------------------------------
     # 3. NO OSM RESULT
@@ -951,9 +1198,3 @@ def nearby_osm_features(
         "nearby",
         [],
     )
-
-
-
-
-
-
