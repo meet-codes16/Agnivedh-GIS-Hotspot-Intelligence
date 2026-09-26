@@ -1,4 +1,4 @@
-﻿from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException
 import time
 
 from app.engine import run_analysis
@@ -10,6 +10,7 @@ router = APIRouter()
 @router.get("/analysis/{hotspot_id}")
 def analysis(hotspot_id: str):
     t0 = time.perf_counter()
+    print(f"[ANALYSIS-START] {hotspot_id}", flush=True)
 
     hotspot = get_hotspot(hotspot_id)
     print(f"[TIMING] get_hotspot: {time.perf_counter() - t0:.3f}s")
@@ -110,3 +111,5 @@ def analysis(hotspot_id: str):
         }
 
     return run_analysis(hotspot)
+
+
