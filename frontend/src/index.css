@@ -172,12 +172,14 @@ body {
 }
 
 .gis-pin {
-  width: 8px;
-  height: 8px;
-  border-radius: 1px;
-  border: 1px solid rgba(255, 255, 255, 0.7);
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  border: 2px solid rgba(255, 255, 255, 0.9);
   transform: rotate(45deg);
-  box-shadow: 0 0 6px rgba(0, 0, 0, 0.6);
+  box-shadow:
+    0 0 0 2px rgba(0, 0, 0, 0.35),
+    0 0 12px currentColor;
 }
 
 .panel-glass {

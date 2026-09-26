@@ -200,8 +200,74 @@ export default function MapView({
           />
         )}
 
-        {/* Nearby context is kept in the intelligence panel to avoid duplicate/unstable map markers. */}
+        {/* OSM nearest industry marker */}
+        {selected &&
+          osmFacility &&
+          Number.isFinite(Number(osmFacility.latitude)) &&
+          Number.isFinite(Number(osmFacility.longitude)) && (
+            <Marker
+              key={`osm-industry-${osmFacility.id || osmFacility.osm_id || "nearest"}`}
+              position={[
+                Number(osmFacility.latitude),
+                Number(osmFacility.longitude),
+              ]}
+              icon={gisIcon(osmFacility.category || "Industrial Facility")}
+              zIndexOffset={700}
+            >
+              <Popup>
+                <div className="min-w-[180px] text-[11px]">
+                  <div className="font-semibold text-slate-900">
+                    {osmFacility.name || "Unnamed OSM facility"}
+                  </div>
+                  <div className="mt-1 text-slate-600">
+                    {osmFacility.category || "Industrial Facility"}
+                  </div>
+                  <div className="mt-1 font-mono text-slate-700">
+                    {Number(osmFacility.distance_km).toFixed(2)} km
+                  </div>
+                  <div className="mt-1 text-[9px] text-slate-500">
+                    Source: OpenStreetMap
+                  </div>
+                </div>
+              </Popup>
+            </Marker>
+          )}
 
+        {/* OSM critical infrastructure marker */}
+        {selected &&
+          criticalContext &&
+          Number.isFinite(Number(criticalContext.latitude)) &&
+          Number.isFinite(Number(criticalContext.longitude)) && (
+            <Marker
+              key={`osm-critical-${criticalContext.id || criticalContext.osm_id || "critical"}`}
+              position={[
+                Number(criticalContext.latitude),
+                Number(criticalContext.longitude),
+              ]}
+              icon={gisIcon(criticalContext.category || "Critical Area")}
+              zIndexOffset={650}
+            >
+              <Popup>
+                <div className="min-w-[180px] text-[11px]">
+                  <div className="font-semibold text-slate-900">
+                    {criticalContext.name ||
+                      criticalContext.display_name ||
+                      criticalContext.category ||
+                      "Critical OSM context"}
+                  </div>
+                  <div className="mt-1 text-slate-600">
+                    {criticalContext.category || "Critical Area"}
+                  </div>
+                  <div className="mt-1 font-mono text-slate-700">
+                    {Number(criticalContext.distance_km).toFixed(2)} km
+                  </div>
+                  <div className="mt-1 text-[9px] text-slate-500">
+                    Source: OpenStreetMap
+                  </div>
+                </div>
+              </Popup>
+            </Marker>
+          )}
 
         {records.map((record) => {
           const { hotspot, comparison, risk, severity, classification } = record;

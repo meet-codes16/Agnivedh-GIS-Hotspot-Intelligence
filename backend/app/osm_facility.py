@@ -1633,7 +1633,6 @@ def nearest_osm_context(
             "Nuclear Facility",
             "Critical Industrial Infrastructure",
         }
-        and str(x.get("name") or "").strip()
     ]
 
     nearest_industry = (

@@ -183,7 +183,12 @@ async function handleSelect(id) {
         setOsmStatus(analysisPayload?.osm_context || null);
       }
     } catch (error) {
-      console.error("OSM facility lookup failed:", error);
+      console.error("[AGNI] Analysis request failed:", {
+        hotspotId: id,
+        name: error?.name,
+        message: error?.message,
+        stack: error?.stack,
+      });
       setOsmFacility(null);
     } finally {
       setOsmLoading(false);
@@ -473,6 +478,7 @@ async function handleSelect(id) {
   osmFacility={osmFacility}
   criticalContext={criticalContext}
   osmLoading={osmLoading}
+  osmStatus={osmStatus}
   osmElapsedSeconds={osmElapsedSeconds}
 /></div>
               <FeaturePanel features={displayedSelectedRecord.features} />

@@ -53,9 +53,9 @@ export function gisIcon(category) {
 
   const icon = L.divIcon({
     className: "gis-icon",
-    html: `<div class="gis-pin" style="background:${color}"></div>`,
-    iconSize: [8, 8],
-    iconAnchor: [4, 4],
+    html: `<div class="gis-pin gis-pin-visible" style="background:${color}"></div>`,
+    iconSize: [14, 14],
+    iconAnchor: [7, 7],
   });
 
   gisIconCache.set(key, icon);
