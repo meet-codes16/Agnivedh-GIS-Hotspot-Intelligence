@@ -231,7 +231,7 @@ async function handleSelect(id) {
 
       let lastError = null;
 
-      for (let attempt = 1; attempt <= 3; attempt++) {
+      for (let attempt = 1; attempt <= 4; attempt++) {
         try {
           const res = await fetch(
             apiUrl(`/api/hotspots/query?${params.toString()}`),
@@ -244,7 +244,11 @@ async function handleSelect(id) {
           const body = await res.json();
 
           if (!res.ok) {
-            throw new Error(body?.detail || "Unable to fetch hotspots");
+            const error = new Error(
+              body?.detail || `Hotspot request failed (${res.status})`
+            );
+            error.status = res.status;
+            throw error;
           }
 
           payload = body;
@@ -257,8 +261,28 @@ async function handleSelect(id) {
 
           lastError = error;
 
-          if (attempt < 3) {
-            await new Promise((resolve) => setTimeout(resolve, 500 * attempt));
+          const retryableHttp =
+            error?.status === 502 ||
+            error?.status === 503 ||
+            error?.status === 504;
+
+          const retryableNetwork =
+            !error?.status;
+
+          if (
+            attempt < 4 &&
+            (retryableHttp || retryableNetwork)
+          ) {
+            const delayMs =
+              attempt === 1 ? 1500 :
+              attempt === 2 ? 3000 :
+              5000;
+
+            await new Promise((resolve) =>
+              setTimeout(resolve, delayMs)
+            );
+          } else {
+            break;
           }
         }
       }
