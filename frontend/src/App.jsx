@@ -1,4 +1,4 @@
-import { apiUrl } from "./utils/api";
+﻿import { apiUrl } from "./utils/api";
 import { useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { ChevronDown, ChevronUp } from "lucide-react";
 import ClassificationPanel from "./components/ClassificationPanel";
@@ -36,11 +36,12 @@ export default function App() {
   const [osmStatus, setOsmStatus] = useState(null);
   const [criticalContext, setCriticalContext] = useState(null);
   const [fetchYear, setFetchYear] = useState("2024");
-  const [fetchDate, setFetchDate] = useState("");
+  const [fetchDate, setFetchDate] = useState("2024-01-01");
   const [fetchDaynight, setFetchDaynight] = useState("ALL");
   const [fetchingHotspots, setFetchingHotspots] = useState(false);
   const [fetchMessage, setFetchMessage] = useState("");
   const [fetchPanelOpen, setFetchPanelOpen] = useState(false);
+  const historicalFetchController = useRef(null);
   const [baselineGridCount, setBaselineGridCount] = useState(0);
   const [selectedAnalysis, setSelectedAnalysis] = useState(null);
   const [manualHotspot, setManualHotspot] = useState(null);
@@ -221,10 +222,50 @@ async function handleSelect(id) {
       } else {
         const params = new URLSearchParams({ year: fetchYear, acq_date: fetchDate });
       if (fetchDaynight !== "ALL") params.set("daynight", fetchDaynight);
-      const res = await fetch(apiUrl(`/api/hotspots/query?${params.toString()}`));
-      payload = await res.json();
-      if (!res.ok) throw new Error(payload?.detail || "Unable to fetch hotspots");
+      if (historicalFetchController.current) {
+        historicalFetchController.current.abort();
+      }
 
+      const controller = new AbortController();
+      historicalFetchController.current = controller;
+
+      let lastError = null;
+
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          const res = await fetch(
+            apiUrl(`/api/hotspots/query?${params.toString()}`),
+            {
+              signal: controller.signal,
+              cache: "no-store",
+            }
+          );
+
+          const body = await res.json();
+
+          if (!res.ok) {
+            throw new Error(body?.detail || "Unable to fetch hotspots");
+          }
+
+          payload = body;
+          lastError = null;
+          break;
+        } catch (error) {
+          if (error?.name === "AbortError") {
+            throw error;
+          }
+
+          lastError = error;
+
+          if (attempt < 3) {
+            await new Promise((resolve) => setTimeout(resolve, 500 * attempt));
+          }
+        }
+      }
+
+      if (lastError) {
+        throw lastError;
+      }
       setRawHotspots(payload.hotspots || []);
       setSource(payload.source || "internal_2024_firms_csv");
         queryCache.current.set(cacheKey, payload);
@@ -244,7 +285,7 @@ async function handleSelect(id) {
       setIntelOpen(false);
       setActiveNav("overview");
       setFetchMessage(
-        `${payload.count || 0} real hotspots loaded • ${fetchDaynight === "ALL" ? "Day + Night" : fetchDaynight === "D" ? "Day" : "Night"}`
+        `${payload.count || 0} real hotspots loaded â€¢ ${fetchDaynight === "ALL" ? "Day + Night" : fetchDaynight === "D" ? "Day" : "Night"}`
       );
     } catch (error) {
       setFetchMessage(error.message || "Hotspot fetch failed.");
@@ -288,7 +329,7 @@ async function handleSelect(id) {
           hotspotCount={allRecords.length}
           anomalyCount={anomalyCount}
           facilityCount={facilityCount}
-          onBroadcast={() => setBroadcast("EMERGENCY CHANNEL ARMED — prototype only. No live dispatch.")}
+          onBroadcast={() => setBroadcast("EMERGENCY CHANNEL ARMED â€” prototype only. No live dispatch.")}
           onReset={handleReset}
         />
 
@@ -389,7 +430,7 @@ async function handleSelect(id) {
           </div>
 
           <div className="pointer-events-none absolute left-[268px] top-3 z-[400] hidden max-w-[520px] text-[9px] tracking-[0.12em] text-ops-400 xl:block">
-            FIRMS → DETECTION → GIS + BASELINE → FEATURES → CLASSIFIER → RISK
+            FIRMS â†’ DETECTION â†’ GIS + BASELINE â†’ FEATURES â†’ CLASSIFIER â†’ RISK
           </div>
 
           <div className="pointer-events-none absolute bottom-[270px] left-3 z-[500] hidden md:block">
@@ -414,7 +455,7 @@ async function handleSelect(id) {
               <div className="mb-2 flex items-center justify-between">
                 <div>
                   <div className="text-[10px] font-semibold tracking-[0.16em] text-[#ff6b6b]">2024 MODEL ANOMALIES</div>
-                  <div className="mt-1 text-[8px] font-mono text-ops-500">REAL LOADED FIRMS EVENTS · MODEL OUTPUT</div>
+                  <div className="mt-1 text-[8px] font-mono text-ops-500">REAL LOADED FIRMS EVENTS Â· MODEL OUTPUT</div>
                 </div>
                 <span className="font-mono text-[11px] text-white">{records.length}</span>
               </div>
@@ -431,12 +472,12 @@ async function handleSelect(id) {
                     >
                       <div className="flex items-center justify-between gap-2">
                         <span className="font-mono text-[9px] text-[#3ec7ff]">{r.hotspot.id}</span>
-                        <span className="font-mono text-[9px] text-[#ff6b6b]">{r.risk?.level || "—"} {r.risk?.score ?? "—"}</span>
+                        <span className="font-mono text-[9px] text-[#ff6b6b]">{r.risk?.level || "â€”"} {r.risk?.score ?? "â€”"}</span>
                       </div>
-                      <div className="mt-1 text-[9px] text-white">{r.hotspot.acq_date} {String(r.hotspot.acq_time).padStart(4, "0")} · {r.classification?.label || "—"}</div>
-                      <div className="mt-1 text-[8px] text-ops-400">Fire evidence {r.fireDetection?.fire_confidence ?? "—"}% · {r.fireDetection?.status || "—"}</div>
+                      <div className="mt-1 text-[9px] text-white">{r.hotspot.acq_date} {String(r.hotspot.acq_time).padStart(4, "0")} Â· {r.classification?.label || "â€”"}</div>
+                      <div className="mt-1 text-[8px] text-ops-400">Fire evidence {r.fireDetection?.fire_confidence ?? "â€”"}% Â· {r.fireDetection?.status || "â€”"}</div>
                       {getValidatedIncident(r.hotspot.id) && (
-                        <div className="mt-1 text-[8px] font-semibold tracking-wide text-[#5dcc8a]">FSI LFF CORROBORATION · {getValidatedIncident(r.hotspot.id).name}</div>
+                        <div className="mt-1 text-[8px] font-semibold tracking-wide text-[#5dcc8a]">FSI LFF CORROBORATION Â· {getValidatedIncident(r.hotspot.id).name}</div>
                       )}
                     </button>
                   ))}
@@ -457,7 +498,7 @@ async function handleSelect(id) {
                 <div className="font-mono text-[12px] text-white">{displayedSelectedRecord.hotspot.id}</div>
                 <div className="flex items-center gap-2">
                   <StatusBadge
-                    label={displayedSelectedRecord.risk?.level || "—"}
+                    label={displayedSelectedRecord.risk?.level || "â€”"}
                     tone={displayedSelectedRecord.risk?.level === "CRITICAL" || displayedSelectedRecord.risk?.level === "HIGH" ? "red" : "amber"}
                   />
                   <button type="button" className="text-[10px] text-ops-400 hover:text-white" onClick={() => setIntelOpen(false)}>close</button>
@@ -491,7 +532,7 @@ async function handleSelect(id) {
                 <div>
                   Confidence: {displayedSelectedRecord.classification?.confidence != null
                     ? `${displayedSelectedRecord.classification.confidence}% model probability`
-                    : "—"}
+                    : "â€”"}
                 </div>
                 <div className="text-[9px] text-ops-500">Probability is not calibrated.</div>
               </div>
@@ -563,6 +604,7 @@ async function handleSelect(id) {
     </div>
   );
 }
+
 
 
 
