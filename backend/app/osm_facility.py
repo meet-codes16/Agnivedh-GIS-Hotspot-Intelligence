@@ -16,6 +16,8 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
+import time
+
 
 
 # ---------------------------------------------------------------------
@@ -32,7 +34,7 @@ NOMINATIM_URL = "https://nominatim.openstreetmap.org/reverse"
 
 # Keep OSM enrichment bounded so a busy public endpoint cannot stall
 # the complete AgniVedh analysis for tens of seconds.
-OSM_TIMEOUT = 3.5
+OSM_TIMEOUT = 10.0
 OSM_QUERY_TIMEOUT = 3
 NOMINATIM_TIMEOUT = 4
 
@@ -40,6 +42,12 @@ MAX_QUERY_RADIUS_M = 10000
 
 CACHE_TTL_SECONDS = 30 * 60
 MAX_CACHE_ITEMS = 2000
+
+# ------------------------------------------------------------------
+# Nominatim rate-limit protection
+# ------------------------------------------------------------------
+_NOMINATIM_COOLDOWN_UNTIL = 0.0
+_NOMINATIM_RATE_LIMIT_SECONDS = 60.0
 
 USER_AGENT = (
     "AgniVedh-GIS/1.0 "
@@ -166,26 +174,32 @@ def _named_facility_query(
         min(int(radius_m), MAX_QUERY_RADIUS_M),
     )
 
-    # Query named facilities only. This substantially reduces the amount
-    # of OSM data returned while preserving actual facility names.
+    # Broad actual OSM facility context.
+    # Do not require ["name"]: many real OSM facilities are mapped
+    # without a name. Downstream parsing uses actual OSM tags and IDs.
     return f"""
 [out:json][timeout:{OSM_QUERY_TIMEOUT}];
 
 (
-  nwr["power"="plant"]["name"](around:{radius_m},{lat},{lon});
-  nwr["power"="generator"]["name"](around:{radius_m},{lat},{lon});
-  nwr["power"="substation"]["name"](around:{radius_m},{lat},{lon});
+  nwr["power"="plant"](around:{radius_m},{lat},{lon});
+  nwr["power"="generator"](around:{radius_m},{lat},{lon});
+  nwr["power"="substation"](around:{radius_m},{lat},{lon});
 
-  nwr["landuse"="industrial"]["name"](around:{radius_m},{lat},{lon});
-  nwr["industrial"]["name"](around:{radius_m},{lat},{lon});
+  nwr["landuse"="industrial"](around:{radius_m},{lat},{lon});
+  nwr["industrial"](around:{radius_m},{lat},{lon});
 
-  nwr["man_made"="works"]["name"](around:{radius_m},{lat},{lon});
-  nwr["man_made"="factory"]["name"](around:{radius_m},{lat},{lon});
-  nwr["man_made"="refinery"]["name"](around:{radius_m},{lat},{lon});
+  nwr["man_made"="works"](around:{radius_m},{lat},{lon});
+  nwr["man_made"="factory"](around:{radius_m},{lat},{lon});
+  nwr["man_made"="refinery"](around:{radius_m},{lat},{lon});
 
-  nwr["generator:source"="nuclear"]["name"](around:{radius_m},{lat},{lon});
+  nwr["generator:source"="nuclear"](around:{radius_m},{lat},{lon});
 
-  nwr["landuse"="military"]["name"](around:{radius_m},{lat},{lon});
+  nwr["landuse"="military"](around:{radius_m},{lat},{lon});
+
+  nwr["amenity"="fuel"](around:{radius_m},{lat},{lon});
+  nwr["man_made"="storage_tank"](around:{radius_m},{lat},{lon});
+  nwr["man_made"="mine"](around:{radius_m},{lat},{lon});
+  nwr["landuse"="quarry"](around:{radius_m},{lat},{lon});
 );
 
 out center tags;
@@ -197,7 +211,7 @@ def _run_overpass(query: str):
     # Try the two commonly available public endpoints, but do not walk
     # through all endpoints for every request. The short timeout keeps
     # OSM enrichment from blocking the main analysis for ~40 seconds.
-    for url in OVERPASS_URLS[:2]:
+    for url in OVERPASS_URLS:
 
         try:
 
@@ -297,6 +311,10 @@ def _facility_category(tags: Dict[str, Any]) -> str:
         tags.get("plant:source", "")
     ).lower()
 
+    military = str(
+        tags.get("military", "")
+    ).lower()
+
     if (
         generator_source == "nuclear"
         or plant_source == "nuclear"
@@ -310,24 +328,30 @@ def _facility_category(tags: Dict[str, Any]) -> str:
     }:
         return "Power Facility"
 
-    if landuse == "industrial":
+    if man_made in {
+        "refinery",
+        "factory",
+        "works",
+    }:
         return "Industrial Facility"
 
     if industrial:
         return "Industrial Facility"
 
-    if man_made in {
-        "works",
-        "factory",
-        "refinery",
-    }:
-        return "Industrial Facility"
+    if landuse == "industrial":
+        return "Industrial Area"
 
-    if landuse == "military":
+    if military or landuse == "military":
         return "Military Installation"
 
-    if "military" in tags:
-        return "Military Installation"
+    if man_made == "storage_tank":
+        return "Storage Facility"
+
+    if man_made == "mine" or landuse == "quarry":
+        return "Mining Facility"
+
+    if str(tags.get("amenity", "")).lower() == "fuel":
+        return "Fuel Facility"
 
     return "Utility Facility"
 
@@ -356,6 +380,10 @@ def _critical_type(
         tags.get("plant:source", "")
     ).lower()
 
+    man_made = str(
+        tags.get("man_made", "")
+    ).lower()
+
     if (
         generator_source == "nuclear"
         or plant_source == "nuclear"
@@ -371,6 +399,9 @@ def _critical_type(
         "substation",
     }:
         return "Critical Power Infrastructure"
+
+    if man_made == "refinery":
+        return "Critical Industrial Infrastructure"
 
     return None
 
@@ -441,17 +472,10 @@ def _element_to_facility(
         tags.get("name", "")
     ).strip()
 
-    if osm_name:
-
-        display_name = osm_name
-
-    elif critical:
-
-        display_name = critical
-
-    else:
-
-        display_name = category
+    # Only a genuine OSM name may be exposed.
+    # Internal category/critical labels must never become
+    # fake real-world facility names.
+    display_name = osm_name
 
     distance = _distance_km(
         hotspot_lat,
@@ -464,7 +488,7 @@ def _element_to_facility(
         "id": _element_id(element),
         "osm_type": element.get("type"),
         "osm_id": element.get("id"),
-        "name": osm_name or display_name,
+        "name": osm_name,
         "display_name": display_name,
         "distance_km": round(distance, 2),
         "latitude": round(lat, 6),
@@ -487,9 +511,23 @@ def _nominatim_reverse(
     lat: float,
     lon: float,
 ):
+    global _NOMINATIM_COOLDOWN_UNTIL
+
+    # If Nominatim recently returned HTTP 429, do not hammer
+    # the service again. Overpass can still be used normally.
+    now = time.monotonic()
+
+    if now < _NOMINATIM_COOLDOWN_UNTIL:
+        remaining = int(
+            _NOMINATIM_COOLDOWN_UNTIL - now
+        )
+        print(
+            "[OSM-NOMINATIM] Rate-limit cooldown active; "
+            f"skipping request ({remaining}s remaining)"
+        )
+        return None
 
     try:
-
         response = requests.get(
             NOMINATIM_URL,
             params={
@@ -498,6 +536,8 @@ def _nominatim_reverse(
                 "format": "jsonv2",
                 "zoom": 18,
                 "addressdetails": 1,
+                "extratags": 1,
+                "namedetails": 1,
             },
             headers={
                 "User-Agent": USER_AGENT,
@@ -506,14 +546,35 @@ def _nominatim_reverse(
             timeout=NOMINATIM_TIMEOUT,
         )
 
-        if response.status_code != 200:
-
-            print(
-                f"[OSM-NOMINATIM] "
-                f"FAILED: HTTP {response.status_code}"
+        if response.status_code == 429:
+            retry_after = response.headers.get(
+                "Retry-After"
             )
 
+            try:
+                cooldown = float(retry_after)
+            except (
+                TypeError,
+                ValueError,
+            ):
+                cooldown = _NOMINATIM_RATE_LIMIT_SECONDS
+
+            cooldown = max(
+                30.0,
+                min(cooldown, 300.0),
+            )
+
+            _NOMINATIM_COOLDOWN_UNTIL = (
+                time.monotonic() + cooldown
+            )
+
+            print(
+                "[OSM-NOMINATIM] HTTP 429; "
+                f"cooldown {int(cooldown)}s"
+            )
             return None
+
+        response.raise_for_status()
 
         data = response.json()
 
@@ -522,28 +583,19 @@ def _nominatim_reverse(
 
         return data
 
-    except requests.Timeout:
-
-        print(
-            "[OSM-NOMINATIM] FAILED: timeout"
-        )
-
     except requests.RequestException as exc:
-
         print(
-            "[OSM-NOMINATIM] FAILED: "
-            f"{type(exc).__name__}: {exc}"
+            "[OSM-NOMINATIM] FAILED:",
+            exc,
         )
+        return None
 
-    except Exception as exc:
-
+    except ValueError as exc:
         print(
-            "[OSM-NOMINATIM] FAILED: "
-            f"{type(exc).__name__}: {exc}"
+            "[OSM-NOMINATIM] INVALID JSON:",
+            exc,
         )
-
-    return None
-
+        return None
 
 
 def _nominatim_search(
@@ -654,43 +706,23 @@ def _nominatim_search(
 
                 category = str(
                     item.get("category") or ""
-                ).lower()
+                ).lower().strip()
 
                 item_type = str(
                     item.get("type") or ""
-                ).lower()
+                ).lower().strip()
 
-                address = item.get("address") or {}
-
-                address_text = " ".join(
-                    str(address.get(k) or "").lower()
-                    for k in (
-                        "industrial",
-                        "factory",
-                        "plant",
-                        "refinery",
-                        "warehouse",
-                        "power",
-                    )
-                )
-
-                combined = " ".join(
-                    (
-                        name.lower(),
-                        category,
-                        item_type,
-                        address_text,
-                    )
-                )
-
+                # Nominatim fallback must use structured OSM-derived
+                # category/type fields only. Facility names and address
+                # text are display information, not classification evidence.
                 osm_supported = (
-                    category in (
+                    category in {
                         "industrial",
                         "man_made",
                         "power",
                         "military",
-                    )
-                    or item_type in (
+                    }
+                    or item_type in {
                         "works",
                         "factory",
                         "refinery",
@@ -701,23 +733,7 @@ def _nominatim_search(
                         "substation",
                         "warehouse",
                         "military",
-                    )
-                    or any(
-                        token in combined
-                        for token in (
-                            "industrial",
-                            "factory",
-                            "plant",
-                            "works",
-                            "refinery",
-                            "substation",
-                            "power",
-                            "generator",
-                            "warehouse",
-                            "military",
-                            "nuclear",
-                        )
-                    )
+                    }
                 )
 
                 if not osm_supported:
@@ -725,24 +741,53 @@ def _nominatim_search(
 
                 critical = None
 
-                if any(
-                    token in combined
-                    for token in (
-                        "power plant",
-                        "power station",
-                        "substation",
-                        "generator",
-                        "nuclear",
-                        "military",
-                        "refinery",
+                if item_type in {
+                    "power",
+                    "plant",
+                    "generator",
+                    "substation",
+                } or category == "power":
+                    critical = "Critical Power Infrastructure"
+
+                elif item_type == "military" or category == "military":
+                    critical = "Military Installation"
+
+                elif item_type == "refinery":
+                    critical = "Critical Industrial Infrastructure"
+
+                if item_type in {
+                    "refinery",
+                    "factory",
+                    "works",
+                    "industrial",
+                } or category == "industrial":
+                    facility_category = (
+                        critical
+                        or "Industrial Facility"
                     )
-                ):
-                    if "military" in combined:
-                        critical = "Military Installation"
-                    elif "refinery" in combined:
-                        critical = "Critical Industrial Infrastructure"
-                    else:
-                        critical = "Critical Power Infrastructure"
+
+                elif item_type in {
+                    "warehouse",
+                }:
+                    facility_category = "Storage Facility"
+
+                elif category == "man_made":
+                    facility_category = "Man-Made Facility"
+
+                elif category == "power":
+                    facility_category = (
+                        critical
+                        or "Power Facility"
+                    )
+
+                elif category == "military":
+                    facility_category = (
+                        critical
+                        or "Military Installation"
+                    )
+
+                else:
+                    facility_category = "OSM Facility"
 
                 facilities.append(
                     {
@@ -758,10 +803,7 @@ def _nominatim_search(
                         "latitude": round(item_lat, 6),
                         "longitude": round(item_lon, 6),
                         "source": "OpenStreetMap",
-                        "category": (
-                            critical
-                            or "Industrial Facility"
-                        ),
+                        "category": facility_category,
                         "_critical": critical is not None,
                     }
                 )
@@ -825,11 +867,77 @@ def _nominatim_search(
                 if not isinstance(item, dict):
                     continue
 
-                name = str(item.get("name") or "").strip()
+                # Prefer an actual OSM name from structured name fields.
+                # Internal classification labels must never become
+                # real-world facility names.
+
+                name = str(
+                    item.get("name") or ""
+                ).strip()
+
                 if not name:
-                    name = str(
+                    namedetails = item.get(
+                        "namedetails"
+                    ) or {}
+
+                    if isinstance(
+                        namedetails,
+                        dict,
+                    ):
+                        name = str(
+                            namedetails.get("name")
+                            or namedetails.get("name:en")
+                            or ""
+                        ).strip()
+
+                internal_category_names = {
+                    "critical power infrastructure",
+                    "critical industrial infrastructure",
+                    "military installation",
+                    "nuclear facility",
+                    "industrial facility",
+                    "power facility",
+                    "storage facility",
+                    "mining facility",
+                    "fuel facility",
+                    "utility facility",
+                    "osm facility",
+                    "man-made facility",
+                    "industrial area",
+                }
+
+                if (
+                    name.lower()
+                    in internal_category_names
+                ):
+                    name = ""
+
+                # Never use internal classification labels as OSM names.
+                if (
+                    name
+                    and name.lower()
+                    in internal_category_names
+                ):
+                    name = ""
+
+                # Only use the first display_name component when it is
+                # clearly a real OSM name, not an internal category label.
+                if not name:
+                    display_candidate = str(
                         item.get("display_name") or ""
                     ).split(",")[0].strip()
+
+                    if (
+                        display_candidate
+                        and display_candidate.lower()
+                        not in internal_category_names
+                    ):
+                        name = display_candidate
+
+                # If Nominatim has no genuine name, keep it unnamed.
+                # Do NOT manufacture a name from category/type.
+                if not name:
+                    name = ""
 
                 item_lat = _safe_float(item.get("lat"))
                 item_lon = _safe_float(item.get("lon"))
@@ -849,34 +957,15 @@ def _nominatim_search(
 
                 category = str(
                     item.get("category") or ""
-                ).lower()
+                ).lower().strip()
+
                 item_type = str(
                     item.get("type") or ""
-                ).lower()
-                address = item.get("address") or {}
+                ).lower().strip()
 
-                address_text = " ".join(
-                    str(address.get(k) or "").lower()
-                    for k in (
-                        "industrial",
-                        "man_made",
-                        "factory",
-                        "plant",
-                        "refinery",
-                        "power",
-                        "military",
-                    )
-                )
-
-                combined = " ".join(
-                    (
-                        name.lower(),
-                        category,
-                        item_type,
-                        address_text,
-                    )
-                )
-
+                # Reverse-geocoding fallback must rely only on
+                # structured OSM/Nominatim category/type fields.
+                # Names and address text are never classification evidence.
                 supported = (
                     category in {
                         "industrial",
@@ -896,22 +985,6 @@ def _nominatim_search(
                         "warehouse",
                         "military",
                     }
-                    or any(
-                        token in combined
-                        for token in (
-                            "industrial",
-                            "factory",
-                            "plant",
-                            "works",
-                            "refinery",
-                            "substation",
-                            "power",
-                            "generator",
-                            "warehouse",
-                            "military",
-                            "nuclear",
-                        )
-                    )
                 )
 
                 if not supported:
@@ -927,25 +1000,36 @@ def _nominatim_search(
 
                 critical = None
 
-                if any(
-                    token in combined
-                    for token in (
-                        "power plant",
-                        "power station",
-                        "substation",
-                        "generator",
-                        "nuclear",
-                        "military",
-                        "refinery",
-                    )
-                ):
-                    if "military" in combined:
-                        critical = "Military Installation"
-                    elif "refinery" in combined:
-                        critical = "Critical Industrial Infrastructure"
-                    else:
-                        critical = "Critical Power Infrastructure"
+                # Critical classification uses only structured
+                # Nominatim category/type fields.
+                # Name/address text is NOT classification evidence.
 
+                if (
+                    item_type == "refinery"
+                    or category == "refinery"
+                ):
+                    critical = (
+                        "Critical Industrial Infrastructure"
+                    )
+
+                elif (
+                    item_type in {
+                        "power",
+                        "plant",
+                        "generator",
+                        "substation",
+                    }
+                    or category == "power"
+                ):
+                    critical = (
+                        "Critical Power Infrastructure"
+                    )
+
+                elif (
+                    item_type == "military"
+                    or category == "military"
+                ):
+                    critical = "Military Installation"
                 facilities.append(
                     {
                         "id": facility_id,
@@ -1019,6 +1103,33 @@ def _nominatim_facility(
     category = str(
         data.get("category", "")
     ).lower()
+
+    # Nominatim extratags are actual OSM structured tags.
+    # They are evidence for classification; facility names
+    # are never used as critical evidence.
+    extra_tags = data.get("extratags") or {}
+
+    if not isinstance(extra_tags, dict):
+        extra_tags = {}
+
+    osm_tags = dict(extra_tags)
+
+    osm_tags["power"] = osm_tags.get(
+        "power",
+        data.get("type", ""),
+    )
+
+    osm_tags["man_made"] = osm_tags.get(
+        "man_made",
+        "",
+    )
+
+    osm_tags["military"] = osm_tags.get(
+        "military",
+        "",
+    )
+
+    critical = _critical_type(osm_tags)
 
     osm_type = data.get(
         "osm_type",
@@ -1100,7 +1211,11 @@ def _nominatim_facility(
             6,
         ),
         "source": "OpenStreetMap",
-        "category": "Industrial Facility",
+        "category": (
+            critical
+            or "Industrial Facility"
+        ),
+        "_critical": critical is not None,
     }
 
 
@@ -1321,6 +1436,168 @@ def nearest_osm_context(
     )
 
     # -------------------------------------------------------------
+    # -------------------------------------------------------------
+    # 4.5 DEDUPLICATE RAW OSM COMPONENTS
+    # -------------------------------------------------------------
+    # Reduce repeated OSM components from the same mapped facility.
+    # Critical facilities and genuinely named facilities are preserved.
+    # No facility names or coordinates are hardcoded.
+
+    def _norm_osm_text(value):
+        return " ".join(
+            str(value or "")
+            .lower()
+            .strip()
+            .split()
+        )
+
+    deduped_facilities = []
+    exact_seen = set()
+    named_groups = {}
+    generic_groups = {}
+
+    for item in facilities:
+
+        osm_type = str(
+            item.get("osm_type") or ""
+        ).lower().strip()
+
+        osm_id = str(
+            item.get("osm_id") or ""
+        ).strip()
+
+        exact_key = (
+            osm_type,
+            osm_id,
+        )
+
+        if osm_type and osm_id:
+            if exact_key in exact_seen:
+                continue
+            exact_seen.add(exact_key)
+
+        category = _norm_osm_text(
+            item.get("category")
+        )
+
+        name = _norm_osm_text(
+            item.get("name")
+        )
+
+        lat_i = _safe_float(
+            item.get("latitude")
+        )
+
+        lon_i = _safe_float(
+            item.get("longitude")
+        )
+
+        critical_flag = bool(
+            item.get("_critical")
+        )
+
+        # Critical facilities are never removed.
+        if critical_flag:
+            deduped_facilities.append(item)
+            continue
+
+        generic_names = {
+            "industrial facility",
+            "storage facility",
+            "power facility",
+            "utility facility",
+            "osm facility",
+            "man-made facility",
+        }
+
+        # Same named facility + same category within 250 m
+        # is treated as the same physical facility.
+        if (
+            name
+            and name not in generic_names
+            and lat_i is not None
+            and lon_i is not None
+        ):
+            group_key = (
+                name,
+                category,
+            )
+
+            duplicate = False
+
+            for existing in named_groups.get(
+                group_key,
+                [],
+            ):
+                existing_lat = _safe_float(
+                    existing.get("latitude")
+                )
+                existing_lon = _safe_float(
+                    existing.get("longitude")
+                )
+
+                if (
+                    existing_lat is not None
+                    and existing_lon is not None
+                    and (
+                        (
+                            (
+                                (lat_i - existing_lat) ** 2
+                            )
+                            +
+                            (
+                                (
+                                    (lon_i - existing_lon)
+                                    * __import__("math").cos(
+                                        __import__("math").radians(
+                                            (lat_i + existing_lat) / 2
+                                        )
+                                    )
+                                ) ** 2
+                            )
+                        ) ** 0.5
+                        * 111.32
+                    ) <= 0.25
+                ):
+                    duplicate = True
+                    break
+
+            if duplicate:
+                continue
+
+            named_groups.setdefault(
+                group_key,
+                [],
+            ).append(item)
+
+            deduped_facilities.append(item)
+            continue
+
+        # Generic unnamed components are grouped into
+        # approximately 100 m coordinate cells.
+        if (
+            lat_i is not None
+            and lon_i is not None
+        ):
+            cell_key = (
+                category or "osm",
+                round(lat_i, 3),
+                round(lon_i, 3),
+            )
+
+            if cell_key in generic_groups:
+                continue
+
+            generic_groups[cell_key] = True
+
+        deduped_facilities.append(item)
+
+    facilities = deduped_facilities
+
+    print(
+        "[OSM] Deduplicated facilities: "
+        f"{len(facilities)} records"
+    )
     # 5. CLEAN OUTPUT
     # -------------------------------------------------------------
 
@@ -1343,6 +1620,10 @@ def nearest_osm_context(
     # 6. NEAREST INDUSTRY
     # -------------------------------------------------------------
 
+    # Nearest industry should represent a genuinely named
+    # OSM facility. Unnamed OSM industrial polygons remain
+    # available in nearby context but are not promoted as
+    # the nearest named industry.
     industrial_candidates = [
         x
         for x in facilities
@@ -1352,6 +1633,7 @@ def nearest_osm_context(
             "Nuclear Facility",
             "Critical Industrial Infrastructure",
         }
+        and str(x.get("name") or "").strip()
     ]
 
     nearest_industry = (
@@ -1461,6 +1743,11 @@ def nearby_osm_features(
         "nearby",
         [],
     )
+
+
+
+
+
 
 
 
