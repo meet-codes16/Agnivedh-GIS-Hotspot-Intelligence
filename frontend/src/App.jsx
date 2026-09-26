@@ -42,7 +42,6 @@ export default function App() {
   const [fetchMessage, setFetchMessage] = useState("");
   const [fetchPanelOpen, setFetchPanelOpen] = useState(false);
   const historicalFetchController = useRef(null);
-  const analysisController = useRef(null);
   const [baselineGridCount, setBaselineGridCount] = useState(0);
   const [selectedAnalysis, setSelectedAnalysis] = useState(null);
   const [manualHotspot, setManualHotspot] = useState(null);
@@ -162,14 +161,6 @@ export default function App() {
   setIntelOpen(true);
 }
 async function handleSelect(id) {
-    // Cancel any previous analysis request before starting a new one.
-    if (analysisController.current) {
-      analysisController.current.abort();
-    }
-
-    const controller = new AbortController();
-    analysisController.current = controller;
-
     setSelectedId(id);
     setShowBottomPanel(true);
     setBaseLayer("satellite");
@@ -182,35 +173,17 @@ async function handleSelect(id) {
     setOsmElapsedSeconds(0);
 
     try {
-      const analysisRes = await fetch(
-        apiUrl(`/api/analysis/${id}`),
-        {
-          signal: controller.signal,
-          cache: "no-store",
-        }
-      );
-
+      const analysisRes = await fetch(apiUrl(`/api/analysis/${id}`));
       const analysisPayload = await analysisRes.json();
-
-      // Ignore a response from an obsolete request.
-      if (controller.signal.aborted || analysisController.current !== controller) {
-        return;
-      }
-
       if (analysisRes.ok) {
         setSelectedAnalysis(analysisPayload);
       }
-
       if (analysisRes.ok) {
         setOsmFacility(analysisPayload?.nearest_industry || null);
         setCriticalContext(analysisPayload?.critical_context || null);
         setOsmStatus(analysisPayload?.osm_context || null);
       }
     } catch (error) {
-      if (error?.name === "AbortError") {
-        return;
-      }
-
       console.error("[AGNI] Analysis request failed:", {
         hotspotId: id,
         name: error?.name,
@@ -219,20 +192,11 @@ async function handleSelect(id) {
       });
       setOsmFacility(null);
     } finally {
-      if (analysisController.current === controller) {
-        setOsmLoading(false);
-        analysisController.current = null;
-      }
+      setOsmLoading(false);
     }
   }
 
   async function handleHistoricalFetch() {
-    // A new date search invalidates any hotspot analysis currently in flight.
-    if (analysisController.current) {
-      analysisController.current.abort();
-      analysisController.current = null;
-    }
-
     if (!fetchDate) {
       setFetchMessage("Select a date first.");
       return;
